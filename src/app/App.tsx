@@ -202,19 +202,46 @@ export default function App() {
     setConfetti(makeConfetti(90));
   }, []);
 
-  // ── Escape key: skip to reveal on desktop ──────────────────────────────────
+  // ── Keyboard traps: Escape to skip, Ctrl+W/F4 blocked while active ──────────
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      const s = screenRef.current;
+      const isActive = s !== "landing" && s !== "reveal";
+
+      // Escape → skip to reveal
+      if (e.key === "Escape" && isActive) {
+        goToReveal();
+        return;
+      }
+
+      // Block Ctrl+W (close tab) and Ctrl+F4 (close tab) while active
+      if (isActive && e.ctrlKey && (e.key === "w" || e.key === "W" || e.key === "F4")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    };
+    // useCapture=true so we intercept before the browser handles it
+    window.addEventListener("keydown", handleKey, true);
+    return () => window.removeEventListener("keydown", handleKey, true);
+  }, [goToReveal]);
+
+  // ── Persistent fullscreen: re-enter if user exits during active screens ─────
+  useEffect(() => {
+    const handleFsChange = () => {
+      // If fullscreen was exited and we're still in an active screen, re-enter
+      if (!document.fullscreenElement) {
         const s = screenRef.current;
         if (s !== "landing" && s !== "reveal") {
-          goToReveal();
+          // Small delay so the browser doesn't reject the re-request
+          setTimeout(() => {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          }, 150);
         }
       }
     };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [goToReveal]);
+    document.addEventListener("fullscreenchange", handleFsChange);
+    return () => document.removeEventListener("fullscreenchange", handleFsChange);
+  }, []);
 
   const restart = useCallback(() => {
     clearTimers();
@@ -284,7 +311,8 @@ export default function App() {
   }, [goToReveal]);
 
   const startScan = () => {
-    document.documentElement.requestFullscreen?.()?.catch(() => {});
+    // Enter fullscreen — this also "seeds" the fullscreenchange listener
+    document.documentElement.requestFullscreen?.().catch(() => {});
     setScreen("scanning");
   };
 
