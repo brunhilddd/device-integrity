@@ -133,10 +133,16 @@ export default function App() {
   const [videoIndex, setVideoIndex] = useState(0);
   const [confetti, setConfetti] = useState<ConfettiPiece[]>([]);
   const timers = useRef<number[]>([]);
-  // Stored in ref so AudioContext is never garbage-collected mid-play
   const audioCtxRef = useRef<AudioContext | null>(null);
-  // Keep a ref to current screen so event listeners always read fresh value
   const screenRef = useRef<Screen>("landing");
+
+  // ── Escape-horror overlay state ───────────────────────────────────────────
+  const [escapeOverlay, setEscapeOverlay] = useState(false);   // overlay visible
+  const [escapeFade, setEscapeFade]       = useState<"in"|"out"|"idle">("idle");
+  const [escapeVidIdx, setEscapeVidIdx]   = useState(0);
+  const escapeActiveRef = useRef(false);   // true while overlay is showing
+  const escapeFadeTimer = useRef<number>(0);
+
   useEffect(() => { screenRef.current = screen; }, [screen]);
 
   // ── Block page close / back-navigation while experience is active ──────────
@@ -144,36 +150,19 @@ export default function App() {
     const blockClose = (e: BeforeUnloadEvent) => {
       if (screenRef.current === "landing" || screenRef.current === "reveal") return;
       e.preventDefault();
-      // Chrome requires returnValue to be set
       e.returnValue = "";
     };
-
-    // Intercept back/forward button: push a dummy state then swallow popstate
     const blockBack = () => {
       if (screenRef.current !== "landing" && screenRef.current !== "reveal") {
-        // Push again so there's always something to swallow
         history.pushState(null, "", window.location.href);
       }
     };
-
-    // When the tab is hidden (phone switches app), blast the alarm if in horror
-    const handleVisibility = () => {
-      if (document.hidden && screenRef.current === "horror") {
-        // nothing extra needed — alarm audio keeps playing
-      }
-    };
-
-    // Seed the history stack so the first popstate can be swallowed
     history.pushState(null, "", window.location.href);
-
     window.addEventListener("beforeunload", blockClose);
     window.addEventListener("popstate", blockBack);
-    document.addEventListener("visibilitychange", handleVisibility);
-
     return () => {
       window.removeEventListener("beforeunload", blockClose);
       window.removeEventListener("popstate", blockBack);
-      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
 
@@ -207,45 +196,71 @@ export default function App() {
     const handleKey = (e: KeyboardEvent) => {
       const s = screenRef.current;
       const isActive = s !== "landing" && s !== "reveal";
-
-      // Escape → skip to reveal
-      if (e.key === "Escape" && isActive) {
-        goToReveal();
-        return;
-      }
-
-      // Block Ctrl+W (close tab) and Ctrl+F4 (close tab) while active
+      if (e.key === "Escape" && isActive) { goToReveal(); return; }
       if (isActive && e.ctrlKey && (e.key === "w" || e.key === "W" || e.key === "F4")) {
         e.preventDefault();
         e.stopImmediatePropagation();
       }
     };
-    // useCapture=true so we intercept before the browser handles it
     window.addEventListener("keydown", handleKey, true);
     return () => window.removeEventListener("keydown", handleKey, true);
   }, [goToReveal]);
 
-  // ── Persistent fullscreen: re-enter if user exits during active screens ─────
-  useEffect(() => {
-    const handleFsChange = () => {
-      // If fullscreen was exited and we're still in an active screen, re-enter
-      if (!document.fullscreenElement) {
-        const s = screenRef.current;
-        if (s !== "landing" && s !== "reveal") {
-          // Small delay so the browser doesn't reject the re-request
-          setTimeout(() => {
-            document.documentElement.requestFullscreen?.().catch(() => {});
-          }, 150);
-        }
-      }
-    };
-    document.addEventListener("fullscreenchange", handleFsChange);
-    return () => document.removeEventListener("fullscreenchange", handleFsChange);
+  // ── Escape-horror trigger: fires on tab-switch, blur, or fullscreen exit ────
+  const triggerEscapeHorror = useCallback(() => {
+    const s = screenRef.current;
+    // Only fire during active prank screens; never if already showing overlay
+    if (s === "landing" || s === "reveal" || escapeActiveRef.current) return;
+    escapeActiveRef.current = true;
+    // Pick a random horror video
+    setEscapeVidIdx(Math.floor(Math.random() * HORROR_VIDEOS.length));
+    setEscapeOverlay(true);
+    setEscapeFade("in");
   }, []);
+
+  useEffect(() => {
+    // visibilitychange → tab switched or minimised
+    const onVisibility = () => {
+      if (document.hidden) triggerEscapeHorror();
+    };
+    // blur → window lost focus (Alt+Tab, clicked another app)
+    const onBlur = () => triggerEscapeHorror();
+    // fullscreenchange → user pressed F11 / Esc to exit fullscreen
+    const onFsChange = () => {
+      if (!document.fullscreenElement) triggerEscapeHorror();
+    };
+
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("fullscreenchange", onFsChange);
+    };
+  }, [triggerEscapeHorror]);
+
+  // Called when the escape-horror video finishes playing
+  const handleEscapeVideoEnded = useCallback(() => {
+    // Fade out the overlay, then go to reveal
+    setEscapeFade("out");
+    clearTimeout(escapeFadeTimer.current);
+    escapeFadeTimer.current = window.setTimeout(() => {
+      setEscapeOverlay(false);
+      setEscapeFade("idle");
+      escapeActiveRef.current = false;
+      goToReveal();
+    }, 700); // matches fade-out duration
+  }, [goToReveal]);
 
   const restart = useCallback(() => {
     clearTimers();
     stopAlarm();
+    // Also reset escape overlay
+    setEscapeOverlay(false);
+    setEscapeFade("idle");
+    escapeActiveRef.current = false;
+    clearTimeout(escapeFadeTimer.current);
     setScreen("landing");
     setProgress(0);
     setCompletedDims([]);
@@ -382,8 +397,97 @@ export default function App() {
           0%,100% { opacity: 1; }
           50%     { opacity: 0.55; }
         }
+        /* ── Escape horror overlay animations ── */
+        @keyframes escapeFlash {
+          0%,100% { background: #000; }
+          15%     { background: #1a0000; }
+          30%     { background: #000; }
+          50%     { background: #0d0000; }
+        }
+        @keyframes escFadeIn {
+          from { opacity: 0; }
+          to   { opacity: 1; }
+        }
+        @keyframes escFadeOut {
+          from { opacity: 1; }
+          to   { opacity: 0; }
+        }
+        @keyframes escShake {
+          0%,100% { transform: translate(0,0) scale(1); }
+          20%     { transform: translate(-8px, 3px) scale(1.01); }
+          40%     { transform: translate(8px,-3px) scale(1.01); }
+          60%     { transform: translate(-5px, 4px) scale(1.01); }
+          80%     { transform: translate(5px,-4px) scale(1.01); }
+        }
         .scrollbar-hide::-webkit-scrollbar { display: none; }
       `}</style>
+
+      {/* ══════════════ ESCAPE HORROR OVERLAY (top of everything) ════════════ */}
+      {escapeOverlay && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 9999,
+            background: "#000",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            animation:
+              escapeFade === "in"  ? "escFadeIn 0.4s ease-out forwards" :
+              escapeFade === "out" ? "escFadeOut 0.7s ease-in forwards" : "none",
+          }}
+        >
+          {/* Shaking horror video fills the whole overlay */}
+          <video
+            key={escapeVidIdx}
+            src={HORROR_VIDEOS[escapeVidIdx]}
+            autoPlay
+            playsInline
+            onEnded={handleEscapeVideoEnded}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              animation: "escShake 0.08s ease-in-out infinite",
+            }}
+          />
+          {/* Red vignette border for drama */}
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              boxShadow: "inset 0 0 120px 40px rgba(180,0,0,0.55)",
+              pointerEvents: "none",
+              zIndex: 1,
+            }}
+          />
+          {/* "YOU TRIED TO ESCAPE" text flash */}
+          <div
+            style={{
+              position: "absolute",
+              top: "8%",
+              left: 0,
+              right: 0,
+              textAlign: "center",
+              zIndex: 2,
+              color: "#ff2222",
+              fontFamily: "'Inter', system-ui, sans-serif",
+              fontWeight: 900,
+              fontSize: "clamp(1rem, 4vw, 2rem)",
+              textTransform: "uppercase",
+              letterSpacing: "0.15em",
+              textShadow: "0 0 20px #ff0000, 0 0 40px #ff0000",
+              animation: "blink 0.6s step-end infinite",
+              pointerEvents: "none",
+            }}
+          >
+            ⚠ YOU TRIED TO ESCAPE ⚠
+          </div>
+        </div>
+      )}
 
       {/* ═══════════════════ LANDING ═══════════════════ */}
       {screen === "landing" && (
